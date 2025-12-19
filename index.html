@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cyber Christmas Tree (Single File)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050103; font-family: 'Courier New', Courier, monospace; }
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+        
+        /* UI Overlay */
+        #ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;
+            display: flex; flex-direction: column; justify-content: space-between; padding: 20px; box-sizing: border-box;
+        }
+        
+        h1 {
+            color: transparent; -webkit-text-stroke: 1px #ff69b4; 
+            background: linear-gradient(45deg, #ff69b4, #00ffff); -webkit-background-clip: text;
+            font-size: 3rem; margin: 0; text-transform: uppercase; letter-spacing: 5px;
+            text-shadow: 0 0 20px rgba(255, 105, 180, 0.5);
+        }
+
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #ff69b4; font-size: 1.2rem; text-align: center;
+            background: rgba(0,0,0,0.8); padding: 20px; border: 1px solid #ff69b4; border-radius: 10px;
+            pointer-events: auto;
+        }
+
+        /* Camera Preview */
+        #cam-preview {
+            position: absolute; bottom: 20px; right: 20px;
+            width: 200px; height: 150px; border-radius: 10px; border: 2px solid #ff69b4;
+            overflow: hidden; background: #000; pointer-events: auto;
+            box-shadow: 0 0 15px #ff69b4;
+        }
+        video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); opacity: 0.6; }
+        
+        /* Status Text */
+        #status {
+            color: #fff; text-align: right; margin-top: 5px; font-size: 0.8rem; text-shadow: 0 0 5px #ff69b4;
+        }
+        .highlight { color: #ff69b4; font-weight: bold; }
+    </style>
+    
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+            "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/+esm"
+        }
+    }
+    </script>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <div id="ui-layer">
+        <div>
+            <h1>Neo-Xmas</h1>
+            <p style="color: #ffaec9; font-size: 0.8rem;">CLICK SCREEN OR USE HAND GESTURES</p>
+        </div>
+
+        <div id="cam-preview">
+            <video id="webcam" autoplay playsinline></video>
+            <div id="status">Loading AI...</div>
+        </div>
+    </div>
+
+    <div id="loading">
+        INITIALIZING SYSTEM...<br>
+        <small style="font-size: 0.7em; color: white;">Please allow camera access</small>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
+
+        // --- Configuration ---
+        const CONFIG = {
+            count: 5000,
+            colorLeaf: new THREE.Color('#FFB7C5'),
+            colorDeco: new THREE.Color('#E0B0FF'),
+            colorRibbon: new THREE.Color('#FFFFFF'),
+            bg: new THREE.Color('#050103')
+        };
+
+        // --- Global State ---
+        const state = {
+            mode: 'TREE', // 'TREE' or 'EXPLODE'
+            rotationOffset: 0,
+            handDetected: false
+        };
+
+        // --- Scene Setup ---
+        const container = document.getElementById('canvas-container');
+        const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ReinhardToneMapping;
+        container.appendChild(renderer.domElement);
+
+        const scene = new THREE.Scene();
+        scene.background = CONFIG.bg;
+        scene.fog = new THREE.Fog(CONFIG.bg, 20, 100);
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 500);
+        camera.position.set(0, 2, 40);
+
+        // --- Lights ---
+        const ambientLight = new THREE.AmbientLight(0x401030, 0.5);
+        scene.add(ambientLight);
+        
+        const spotLight = new THREE.SpotLight(0xffc0cb, 10);
+        spotLight.position.set(20, 50, 20);
+        spotLight.angle = 0.3;
+        spotLight.penumbra = 1;
+        scene.add(spotLight);
+
+        const purpleLight = new THREE.PointLight(0x8A2BE2, 5, 50);
+        purpleLight.position.set(-15, 0, -15);
+        scene.add(purpleLight);
+
+        // --- Particle System (InstancedMesh) ---
+        const geometry = new THREE.OctahedronGeometry(0.15, 0);
+        const material = new THREE.MeshStandardMaterial({
+            color: CONFIG.colorLeaf,
+            roughness: 0.4,
+            metalness: 0.6,
+            emissive: 0xff69b4,
+            emissiveIntensity: 0.2
+        });
+
+        const instancedMesh = new THREE.InstancedMesh(geometry, material, CONFIG.count);
+        scene.add(instancedMesh);
+
+        // Data Arrays
+        const particles = [];
+        const dummy = new THREE.Object3D();
+
+        // Initialize Particles
+        for (let i = 0; i < CONFIG.count; i++) {
+            // 1. Explode Position
+            const phi = Math.acos(-1 + (2 * i) / CONFIG.count);
+            const theta = Math.sqrt(CONFIG.count * Math.PI) * phi;
+            const r = 10 + Math.random() * 15;
+            const explodePos = new THREE.Vector3(
+                r * Math.cos(theta) * Math.sin(phi),
+                r * Math.sin(theta) * Math.sin(phi),
+                r * Math.cos(phi)
+            );
+
+            // 2. Tree Position
+            const t = i / CONFIG.count;
+            const angle = t * Math.PI * 40;
+            const y = -10 + t * 20;
+            const radius = (1 - Math.pow(t, 0.8)) * 8;
+            const jitter = Math.random() * 0.5;
+            
+            const treePos = new THREE.Vector3(
+                (radius + jitter) * Math.cos(angle),
+                y,
+                (radius + jitter) * Math.sin(angle)
+            );
+
+            // Ribbon Logic
+            let isRibbon = false;
+            if (Math.abs((angle % (Math.PI * 2)) - 0) < 0.1 && t > 0.05) {
+                isRibbon = true;
+                const ribRadius = radius + 1.0;
+                treePos.set(ribRadius * Math.cos(angle), y, ribRadius * Math.sin(angle));
+            }
+
+            // Initial Color logic (simulated by scale/type for simplicity in single mat)
+            const scale = isRibbon ? 0.5 : (Math.random() * 0.5 + 0.5);
+            
+            particles.push({
+                treePos,
+                explodePos,
+                currentPos: explodePos.clone(),
+                rotation: new THREE.Euler(Math.random()*Math.PI, Math.random()*Math.PI, 0),
+                scale: scale,
+                speed: Math.random() * 0.02 + 0.01
+            });
+        }
+
+        // --- Top Star ---
+        const starGeo = new THREE.DodecahedronGeometry(1, 0);
+        const starMat = new THREE.MeshBasicMaterial({ color: 0xffffff }); // Bright white
+        const starMesh = new THREE.Mesh(starGeo, starMat);
+        starMesh.position.set(0, 11, 0);
+        scene.add(starMesh);
+        
+        // Star Glow
+        const glowGeo = new THREE.DodecahedronGeometry(1.2, 0);
+        const glowMat = new THREE.MeshBasicMaterial({ color: 0xff69b4, transparent: true, opacity: 0.3 });
+        const glowMesh = new THREE.Mesh(glowGeo, glowMat);
+        starMesh.add(glowMesh);
+
+        // --- Post Processing (Bloom) ---
+        const composer = new EffectComposer(renderer);
+        const renderPass = new RenderPass(scene, camera);
+        composer.addPass(renderPass);
+
+        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+        bloomPass.threshold = 0.2;
+        bloomPass.strength = 1.2; // Glow intensity
+        bloomPass.radius = 0.5;
+        composer.addPass(bloomPass);
+
+        // --- Controls ---
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.enablePan = false;
+        controls.minDistance = 20;
+        controls.maxDistance = 60;
+
+        // --- Interaction Logic ---
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Click to toggle
+        window.addEventListener('click', () => {
+            state.mode = state.mode === 'TREE' ? 'EXPLODE' : 'TREE';
+            console.log("Mode toggled to:", state.mode);
+        });
+
+        // --- Animation Loop ---
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const delta = clock.getDelta();
+            const time = clock.getElapsedTime();
+
+            // 1. Group Rotation (Auto + Hand)
+            const baseRot = time * 0.1;
+            const finalRot = baseRot + state.rotationOffset;
+
+            // 2. Update Particles
+            let i = 0;
+            for (const p of particles) {
+                // Lerp Position
+                const target = state.mode === 'TREE' ? p.treePos : p.explodePos;
+                p.currentPos.lerp(target, 4.0 * delta);
+
+                dummy.position.copy(p.currentPos);
+                
+                // Rotation logic
+                const x = dummy.position.x;
+                const z = dummy.position.z;
+                
+                // Apply global rotation to position
+                dummy.position.x = x * Math.cos(finalRot) - z * Math.sin(finalRot);
+                dummy.position.z = x * Math.sin(finalRot) + z * Math.cos(finalRot);
+
+                // Self rotation
+                if (state.mode === 'EXPLODE') {
+                    dummy.rotation.set(p.rotation.x + time, p.rotation.y + time, 0);
+                } else {
+                    dummy.rotation.copy(p.rotation);
+                    dummy.rotation.y += time * 0.5; // Gentle spin
+                }
+                
+                dummy.scale.setScalar(p.scale);
+                dummy.updateMatrix();
+                instancedMesh.setMatrixAt(i++, dummy.matrix);
+            }
+            instancedMesh.instanceMatrix.needsUpdate = true;
+
+            // 3. Update Star
+            starMesh.rotation.y += delta;
+            starMesh.rotation.z = Math.sin(time) * 0.1;
+            // Float
+            starMesh.position.y = (state.mode === 'TREE' ? 11 : 20) + Math.sin(time * 2) * 0.5;
+            
+            // Star scale logic
+            const targetScale = state.mode === 'TREE' ? 1 : 0.01;
+            starMesh.scale.lerp(new THREE.Vector3(targetScale, targetScale, targetScale), delta * 2);
+
+            controls.update();
+            composer.render();
+        }
+
+        // --- MediaPipe AI Setup ---
+        const video = document.getElementById('webcam');
+        const statusEl = document.getElementById('status');
+        const loadingEl = document.getElementById('loading');
+        let handLandmarker = undefined;
+
+        async function createHandLandmarker() {
+            try {
+                const vision = await FilesetResolver.forVisionTasks(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm"
+                );
+                handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+                        delegate: "GPU"
+                    },
+                    runningMode: "VIDEO",
+                    numHands: 1
+                });
+                loadingEl.style.display = 'none';
+                statusEl.innerText = "AI Ready. Showing Camera...";
+                startWebcam();
+            } catch (e) {
+                console.error(e);
+                loadingEl.innerHTML = "AI FAILED TO LOAD.<br>Check console/network.";
+            }
+        }
+
+        function startWebcam() {
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } })
+                .then((stream) => {
+                    video.srcObject = stream;
+                    video.addEventListener('loadeddata', predictWebcam);
+                })
+                .catch(err => {
+                    statusEl.innerText = "Camera Denied";
+                    console.error(err);
+                });
+            }
+        }
+
+        let lastVideoTime = -1;
+        async function predictWebcam() {
+            if (handLandmarker && video.currentTime !== lastVideoTime) {
+                lastVideoTime = video.currentTime;
+                const startTimeMs = performance.now();
+                const results = handLandmarker.detectForVideo(video, startTimeMs);
+
+                if (results.landmarks && results.landmarks.length > 0) {
+                    state.handDetected = true;
+                    statusEl.innerHTML = "<span class='highlight'>HAND DETECTED</span>";
+                    
+                    const landmarks = results.landmarks[0];
+                    
+                    // 1. Pinch Detection (Thumb tip 4, Index tip 8)
+                    const thumb = landmarks[4];
+                    const index = landmarks[8];
+                    const dist = Math.sqrt(Math.pow(thumb.x - index.x, 2) + Math.pow(thumb.y - index.y, 2));
+
+                    if (dist < 0.06) state.mode = 'TREE';
+                    else if (dist > 0.12) state.mode = 'EXPLODE';
+
+                    // 2. Rotation Control (Palm x)
+                    // Mirroring logic: (1 - x)
+                    const x = 1 - landmarks[9].x; 
+                    state.rotationOffset = (x - 0.5) * 5; // Sensitivity
+
+                } else {
+                    state.handDetected = false;
+                    statusEl.innerText = "Scanning...";
+                }
+            }
+            requestAnimationFrame(predictWebcam);
+        }
+
+        // Start Everything
+        animate();
+        createHandLandmarker();
+
+    </script>
+</body>
+</html>
